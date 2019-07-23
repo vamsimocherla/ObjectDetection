@@ -1,0 +1,5 @@
+:: Observations ::
+EXIF information from JPG files is not handled by VIA tool
+Due to this, some images may be rotated which will lead to the masks being malformed
+
+Class IDs must start from index 1 as index 0 is reserved for BG
