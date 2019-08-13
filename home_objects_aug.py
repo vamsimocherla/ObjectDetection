@@ -19,6 +19,7 @@ import imgaug.augmenters as iaa
 import re
 import time
 import logging
+from FramesPerSec import FramesPerSec
 
 ############################################################
 #  Initializations
@@ -96,7 +97,7 @@ LOGS_AND_MODEL_DIR = os.path.abspath("/home/vamsimocherla/Storage/DL4OD/mrcnn_mo
 
 class ObjectsConfig(Config):
     # give the configuration a recognizable name
-    NAME = "home_objects_all_classes_adam_"
+    NAME = "home_objects_all_classes_imagenet_weights_"
 
     # Debug Logs
     LOG_FILE = os.path.sep.join([LOGS_AND_MODEL_DIR, NAME + "_debug_log.txt"])
@@ -122,8 +123,8 @@ class ObjectsConfig(Config):
 
     # set the number of steps per training epoch
     # STEPS_PER_EPOCH = len(trainIdxs) // (IMAGES_PER_GPU * GPU_COUNT)
-    STEPS_PER_EPOCH = 300
-    VALIDATION_STEPS = 50
+    STEPS_PER_EPOCH = 100
+    VALIDATION_STEPS = 20
     LEARNING_RATE = 0.001
     IMAGE_MIN_DIM = 800
     IMAGE_MAX_DIM = 1024
@@ -133,7 +134,7 @@ class ObjectsConfig(Config):
     # enough positive proposals to fill this and keep a positive:negative
     # ratio of 1:3. You can increase the number of proposals by adjusting
     # the RPN NMS threshold.
-    # TRAIN_ROIS_PER_IMAGE = 512
+    TRAIN_ROIS_PER_IMAGE = 512
 
     # number of classes (+1 for the background)
     NUM_CLASSES = len(CLASS_NAMES) + 1
@@ -151,7 +152,7 @@ class ObjectsConfig(Config):
 
     ### Task C ###
     # change optimizer to Adam
-    OPTIMIZER = "ADAM"  # default is SGD
+    # OPTIMIZER = "ADAM"  # default is SGD
 
     ### Task D ###
     # test time augmentation
@@ -299,6 +300,53 @@ def create_directory(dir):
         os.makedirs(dir)
 
 
+def draw_roi(r, image):
+    # loop over of the detected object's bounding boxes and
+    # masks, drawing each as we go along
+    for i in range(0, r["rois"].shape[0]):
+        mask = r["masks"][:, :, i]
+        image = visualize.apply_mask(image, mask,
+                                     (1.0, 0.0, 0.0), alpha=0.5)
+        image = visualize.draw_box(image, r["rois"][i],
+                                   (1.0, 0.0, 0.0))
+
+    # convert the image back to BGR so we can use OpenCV's
+    # drawing functions
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+    # loop over the predicted scores and class labels
+    for i in range(0, len(r["scores"])):
+        # extract the bounding box information, class ID, label,
+        # and predicted probability from the results
+        (startY, startX, endY, end) = r["rois"][i]
+        classID = r["class_ids"][i]
+        classes = dict([(value, key) for key, value in CLASS_NAMES.items()])
+        label = classes[classID]
+        score = r["scores"][i]
+
+        # draw the class label and score on the image
+        text = "{}: {:.4f}".format(label, score)
+        # print("[INFO] predictions: {}".format(text))
+        y = startY - 10 if startY - 10 > 10 else startY + 10
+        cv2.putText(image, text, (startX, y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+    # draw the video resolution
+    cv2.putText(image, "{}x{}".format(img_res[0], img_res[1]),
+                (0, 30), font, 1.0, cyan, 2)
+
+    # draw the FPS
+    cv2.putText(image, "{:.0f} fps".format(fps.fps()), (0, 60),
+                font, 1.0, cyan, 2)
+
+    # increment FPS counter
+    fps.increment()
+
+    # resize the image so it more easily fits on our screen
+    # image = imutils.resize(image, width=512)
+    return image
+
+
 if __name__ == "__main__":
     # construct the argument parser and parse the arguments
     ap = argparse.ArgumentParser()
@@ -347,11 +395,20 @@ if __name__ == "__main__":
         if args["weights"] == "last":
             print("[INFO] Loading last saved weights from disk")
             model.load_weights(model.find_last(), by_name=True)
-        else:
+        elif args["weights"] == "coco":
             print("[INFO] Loading weights from pre-trained COCO")
             model.load_weights(COCO_PATH, by_name=True,
                                exclude=["mrcnn_class_logits", "mrcnn_bbox_fc",
                                         "mrcnn_bbox", "mrcnn_mask"])
+        elif args["weights"] == "imagenet":
+            # Start from ImageNet trained weights
+            weights = model.get_imagenet_weights()
+            print("[INFO] Loading weights from pre-trained ImageNet")
+            model.load_weights(weights, by_name=True)
+        else:
+            print("[INFO] Loading weights provided in arguments")
+            model.load_weights(args["weights"], by_name=True)
+
         end = time.time()
         print("[INFO] Model Init Time: {} seconds".format(end-start))
         logging.info("Model Init Time: {} seconds".format(end-start))
@@ -365,7 +422,7 @@ if __name__ == "__main__":
         # train *just* the layer heads
         total_start = time.time()
         start = time.time()
-        model.train(trainDataset, valDataset, epochs=20,
+        model.train(trainDataset, valDataset, epochs=10,
                     augmentation=augmentation,
                     layers="heads", learning_rate=config.LEARNING_RATE/10)
         end = time.time()
@@ -374,7 +431,7 @@ if __name__ == "__main__":
 
         # train *just* the layer heads
         start = time.time()
-        model.train(trainDataset, valDataset, epochs=40,
+        model.train(trainDataset, valDataset, epochs=20,
                     augmentation=augmentation,
                     layers="heads", learning_rate=config.LEARNING_RATE/100)
         end = time.time()
@@ -383,7 +440,7 @@ if __name__ == "__main__":
 
         # unfreeze the body of the network and train *all* layers
         start = time.time()
-        model.train(trainDataset, valDataset, epochs=60,
+        model.train(trainDataset, valDataset, epochs=30,
                     layers="all", learning_rate=config.LEARNING_RATE/100)
         end = time.time()
         print("[INFO] Training Time Phase 3: {} seconds".format(end-start))
@@ -391,36 +448,6 @@ if __name__ == "__main__":
         total_end = time.time()
         print("[INFO] Total Training Time: {} seconds".format(total_end-total_start))
         logging.info("Total Training Time: {} seconds".format(total_end-total_start))
-
-        '''
-        total_start = time.time()
-        start = time.time()
-        model.train(trainDataset, valDataset, epochs=120,
-                    augmentation=augmentation,
-                    layers="heads", learning_rate=config.LEARNING_RATE / 10)
-        end = time.time()
-        print("[INFO] Training Time Phase 1: {} seconds".format(end-start))
-        logging.info("Training Time Phase 1: {} seconds".format(end-start))
-
-        start = time.time()
-        model.train(trainDataset, valDataset, epochs=180,
-                    augmentation=augmentation,
-                    layers="heads", learning_rate=config.LEARNING_RATE / 100)
-        end = time.time()
-        print("[INFO] Training Time Phase 2: {} seconds".format(end-start))
-        logging.info("Training Time Phase 2: {} seconds".format(end-start))
-
-        # unfreeze the body of the network and train *all* layers
-        start = time.time()
-        model.train(trainDataset, valDataset, epochs=210,
-                    layers="all", learning_rate=config.LEARNING_RATE / 100)
-        end = time.time()
-        print("[INFO] Training Time Phase 3: {} seconds".format(end-start))
-        logging.info("Training Time Phase 3: {} seconds".format(end-start))
-        total_end = time.time()
-        print("[INFO] Total Training Time: {} seconds".format(total_end-total_start))
-        logging.info("Total Training Time: {} seconds".format(total_end-total_start))
-        '''
 
     # check to see if we are predicting using a trained Mask R-CNN
     elif args["mode"] == "predict":
@@ -495,6 +522,83 @@ if __name__ == "__main__":
         # show the output image
         cv2.imshow("Output", image)
         cv2.waitKey(0)
+
+    # check to see if we are predicting using a trained Mask R-CNN
+    elif args["mode"] == "video":
+        # initialize the inference configuration
+        config = ObjectsInferenceConfig()
+
+        # initialize the Mask R-CNN model for inference
+        model = modellib.MaskRCNN(mode="inference", config=config,
+                                  model_dir=LOGS_AND_MODEL_DIR)
+
+        # load our trained Mask R-CNN
+        weights = args["weights"] if args["weights"] \
+            else model.find_last()
+        print("[INFO] model_weights: {}".format(weights))
+        model.load_weights(weights, by_name=True)
+
+        # read input from webcam
+        camera = cv2.VideoCapture(0)
+        # img_res = (800, 600)
+        img_res = (1280, 720)
+        ####################################
+        ### Ubuntu Hack - to improve FPS ###
+        ####################################
+        camera.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, img_res[0])
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, img_res[1])
+
+        # FPS counter
+        fps = FramesPerSec().start()
+
+        # Display parameters
+        red = (0, 0, 255)
+        green = (0, 255, 0)
+        white = (255, 255, 255)
+        cyan = (255, 255, 0)
+        black = (0, 0, 0)
+        dark_gray = (75, 75, 75)
+        font = cv2.FONT_HERSHEY_DUPLEX
+
+        OUTPUT_VIDEO_PATH = os.path.sep.join([OUTPUT_PATH, "output.avi"])
+        fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+        video_out = cv2.VideoWriter(OUTPUT_VIDEO_PATH, fourcc, 5.0, img_res)
+        print("[INFO] Saving video to: {}".format(OUTPUT_VIDEO_PATH))
+
+        webcam = True
+        save = True
+        while True:
+            # load the input image, convert it from BGR to RGB channel
+            # ordering, and resize the image
+            if webcam:
+                success, image = camera.read()
+            else:
+                index = random.randint(0, len(IMAGES_PATH))
+                image = cv2.imread(IMAGES_PATH[index])
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # perform a forward pass of the network to obtain the results
+            start = time.time()
+            r = model.detect([image], verbose=0)[0]
+            end = time.time()
+            print("[INFO] FPS: {} Prediction Time: {} seconds".format(
+                fps.fps(), end-start), end="\r")
+
+            image = draw_roi(r, image)
+            # show the output image
+            cv2.imshow("Output", image)
+
+            if save:
+                # write the flipped frame
+                video_out.write(image)
+
+            if cv2.waitKey(1) == ord("q"):
+                break
+
+        camera.release()
+        video_out.release()
+        cv2.destroyAllWindows()
 
     # check to see if we are investigating our images and masks
     elif args["mode"] == "investigate":
